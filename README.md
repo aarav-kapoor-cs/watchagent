@@ -106,9 +106,10 @@ Optional `city` filter and `limit` (default 50, most recent first).
 curl "http://localhost:8000/readings?city=Ottawa&limit=50"
 ```
 ```json
-{ "readings": [ { "id": 42, "city": "Ottawa", "observed_at": "...",
-  "temperature": 21.3, "apparent_temp": 20.1, "precipitation": 0.0,
-  "wind_speed": 9.0, "weather_code": 1, "fetched_at": "..." } ] }
+{ "readings": [ { "city": "Ottawa", "latitude": 45.42, "longitude": -75.69,
+  "time": "...", "stored_at": "...", "temperature_2m": 21.3,
+  "apparent_temperature": 20.1, "precipitation": 0.0, "wind_speed_10m": 9.0,
+  "weather_code": 1 } ] }
 ```
 
 ### `GET /events`
@@ -117,12 +118,19 @@ Optional `city` filter and `limit` (default 50, most recent first).
 curl "http://localhost:8000/events?city=Ottawa&limit=50"
 ```
 ```json
-{ "events": [ { "id": 3, "city": "Ottawa", "event_type": "anomaly",
-  "field": "temperature", "severity": "severe", "value": 30.0,
+{ "events": [ { "city": "Ottawa", "event_type": "anomaly",
+  "field": "temperature", "time": "...", "severity": "severe", "value": 30.0,
+  "summary": "temperature unusually above recent average",
   "reason": "temperature 30.0 is 9.5x the normal spread above the recent
-  average of 18.1 (last 6 readings)", "observed_at": "...",
-  "created_at": "..." } ] }
+  average of 18.1 (last 6 readings)", "reading_id": 42 } ] }
 ```
+
+Response field names follow the Open-Meteo / challenge contract (`time`,
+`temperature_2m`, `apparent_temperature`, `wind_speed_10m`). The storage layer
+uses shorter internal column names and is mapped to these public names in
+`app/main.py`, so the database schema stays decoupled from the API shape. Each
+event carries both a short `summary` and a detailed `reason`, plus the
+`reading_id` of the observation that triggered it.
 
 Interactive OpenAPI docs are auto-generated at `http://localhost:8000/docs`.
 
@@ -170,7 +178,7 @@ extraordinary in Vancouver. The threshold ignores *context*, which is exactly
 what makes an event notable.
 
 So every detector here judges a reading **against recent history for the same
-city**, and treats each field on its own terms. There are four detectors:
+city**, and treats each field on its own terms. There are five detectors:
 
 **1. Contextual anomaly (temperature, wind).**
 For a new reading we compute how far it sits from the mean of the recent window,
@@ -198,16 +206,29 @@ z-score is meaningless. It's handled **categorically** instead: rain starting
 after a dry reading (onset) or a reading at/above 4 mm (heavy) is the event.
 This is the clearest example of "each field carries different signal".
 
-**4. Cross-city temperature spread.**
+**4. Feels-like gap (apparent vs actual temperature).**
+When the apparent temperature diverges from the actual by ≥ 6 °C (severe at
+≥ 10 °C) — wind chill or humidity — *how it feels* is the notable fact, not the
+number on the thermometer. This uses the `apparent_temperature` field the other
+detectors don't, so it carries independent signal.
+
+**5. Cross-city temperature spread.**
 After each poll cycle, if the warmest and coldest of the three cities differ by
 ≥ 18 °C (severe at ≥ 25 °C), that spread is itself surfaced as a system-level
 event attributed to the pseudo-city `ALL`. This is information about the *set*
 of cities, not any one of them.
 
 Every event is stored with enough to answer **what happened, in which city,
-when, and why** — `event_type`, `field`, `severity`, `value`, a human-readable
-`reason`, and the observation timestamp. All thresholds are named constants at
-the top of `detector.py` so behaviour is tunable in one place.
+when, and why** — `event_type`, `field`, `severity`, `value`, a short `summary`,
+a human-readable `reason`, the observation timestamp, and the `reading_id` of
+the triggering observation. All thresholds are named constants at the top of
+`detector.py` so behaviour is tunable in one place.
+
+**Avoiding repeated noise.** A condition that stays true across poll cycles (the
+API only updates hourly, but we poll more often) must not re-fire forever. The
+same `(city, event_type, field, observed_at)` is enforced unique at the storage
+layer, so an identical event is recorded once rather than on every cycle — this
+is covered by `tests/test_event_dedup.py`.
 
 **What it deliberately avoids:** firing on every reading, firing on absolute
 values alone, and treating all fields identically. The tests encode both
@@ -298,12 +319,44 @@ app/
   poller.py          background fetch/store/detect loop
   main.py            FastAPI app + endpoints
 tests/
+  conftest.py        shared temp-DB fixtures
   test_dedup.py      same reading twice -> one row
+  test_event_dedup.py repeated identical event -> stored once
   test_detector.py   firing + staying-quiet assertions
-  test_api.py        endpoint shapes
+  test_api.py        endpoint shapes + contract field names
 .cursor/
   rules/             two project rules
   agents/            detection-reviewer + test-runner agents
   skills/analyze.py  executable analysis skill
 Dockerfile  docker-compose.yml  .env.example  .github/workflows/ci.yml
 ```
+
+---
+
+## Limitations & future work
+
+This is a deliberately small, single-container service. Known trade-offs and
+things a production version would address:
+
+- **Single SQLite connection behind a lock.** The poller thread and API share
+  one connection guarded by a mutex. WAL mode keeps reads and writes from
+  blocking each other, but all access is still serialised. Fine for three
+  cities polled at most every few minutes; a higher-throughput deployment would
+  move to a connection pool or a server database (Postgres).
+- **In-process poller, not a separate worker.** The poller runs as a daemon
+  thread inside the API process (started via FastAPI lifespan). This keeps the
+  deployment one container, but the poller and API can't be scaled
+  independently, and `stop()` signals the thread without joining it on
+  shutdown.
+- **Hand-set per-city baselines.** `temp_std` / `wind_std` in `config.py` are
+  reasonable hand-picked values, not learned from data. A future version could
+  derive them from the stored history and adapt seasonally.
+- **Event dedup is timestamp-based.** Identical events for the same
+  `observed_at` are suppressed, but a slowly drifting condition can still emit
+  one event per new observation. A cooldown window or state machine
+  (fire-on-transition, clear-on-normalise) would be the next refinement.
+- **No auth / rate limiting on the API.** The endpoints are read-only and
+  unauthenticated, which is fine for a local demo but not for public exposure.
+- **Weather-code transitions are stored but not yet detected.** Surfacing
+  meaningful WMO transitions (clear → rain/snow/fog/storm) is a natural next
+  detector.
