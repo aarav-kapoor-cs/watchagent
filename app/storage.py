@@ -29,6 +29,8 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS readings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     city          TEXT    NOT NULL,
+    latitude      REAL,
+    longitude     REAL,
     observed_at   TEXT    NOT NULL,
     temperature   REAL,
     apparent_temp REAL,
@@ -46,9 +48,14 @@ CREATE TABLE IF NOT EXISTS events (
     field       TEXT,
     severity    TEXT    NOT NULL,
     value       REAL,
+    summary     TEXT    NOT NULL,
     reason      TEXT    NOT NULL,
     observed_at TEXT    NOT NULL,
-    created_at  TEXT    NOT NULL
+    created_at  TEXT    NOT NULL,
+    reading_id  INTEGER,
+    -- Suppress repeated identical events: the same condition for the same city
+    -- at the same observed timestamp is stored once, not on every poll cycle.
+    UNIQUE (city, event_type, field, observed_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_city_time
@@ -79,22 +86,26 @@ class Storage:
 
     # ---- readings -------------------------------------------------------
 
-    def insert_reading(self, reading: dict[str, Any]) -> bool:
-        """Insert a reading. Returns True if stored, False if it was a duplicate.
+    def insert_reading(self, reading: dict[str, Any]) -> Optional[int]:
+        """Insert a reading. Returns the new row id, or None if it was a duplicate.
 
         Duplicate detection relies on the UNIQUE(city, observed_at) constraint.
         We catch IntegrityError rather than checking first to avoid a race
-        between the SELECT and the INSERT.
+        between the SELECT and the INSERT. The returned id lets the caller link
+        any detected events back to the exact reading that triggered them.
         """
         with self._lock:
             try:
-                self._conn.execute(
+                cur = self._conn.execute(
                     """INSERT INTO readings
-                       (city, observed_at, temperature, apparent_temp,
-                        precipitation, wind_speed, weather_code, fetched_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (city, latitude, longitude, observed_at, temperature,
+                        apparent_temp, precipitation, wind_speed, weather_code,
+                        fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         reading["city"],
+                        reading.get("latitude"),
+                        reading.get("longitude"),
                         reading["observed_at"],
                         reading.get("temperature"),
                         reading.get("apparent_temp"),
@@ -105,10 +116,10 @@ class Storage:
                     ),
                 )
                 self._conn.commit()
-                return True
+                return cur.lastrowid
             except sqlite3.IntegrityError:
                 # Same (city, observed_at) already stored — expected on repeat polls.
-                return False
+                return None
 
     def recent_readings(self, city: str, limit: int) -> list[dict[str, Any]]:
         """Most recent readings for a city, newest first."""
@@ -134,25 +145,38 @@ class Storage:
 
     # ---- events ---------------------------------------------------------
 
-    def insert_event(self, event: dict[str, Any]) -> None:
+    def insert_event(self, event: dict[str, Any]) -> bool:
+        """Insert a notable event. Returns True if stored, False if suppressed.
+
+        A repeat of the same (city, event_type, field, observed_at) is dropped by
+        the UNIQUE constraint, so a condition that stays true across poll cycles
+        is recorded once rather than re-firing forever.
+        """
         with self._lock:
-            self._conn.execute(
-                """INSERT INTO events
-                   (city, event_type, field, severity, value, reason,
-                    observed_at, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    event["city"],
-                    event["event_type"],
-                    event.get("field"),
-                    event["severity"],
-                    event.get("value"),
-                    event["reason"],
-                    event["observed_at"],
-                    event["created_at"],
-                ),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    """INSERT INTO events
+                       (city, event_type, field, severity, value, summary,
+                        reason, observed_at, created_at, reading_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event["city"],
+                        event["event_type"],
+                        event.get("field"),
+                        event["severity"],
+                        event.get("value"),
+                        event["summary"],
+                        event["reason"],
+                        event["observed_at"],
+                        event["created_at"],
+                        event.get("reading_id"),
+                    ),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                # Identical event already recorded for this timestamp — suppress.
+                return False
 
     def recent_events(self, city: Optional[str], limit: int) -> list[dict[str, Any]]:
         with self._lock:
