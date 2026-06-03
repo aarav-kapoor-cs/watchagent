@@ -58,15 +58,15 @@ class Poller:
                 continue
 
             latest_by_city[city.name] = reading
-            stored = self._storage.insert_reading(reading)
-            if not stored:
+            reading_id = self._storage.insert_reading(reading)
+            if reading_id is None:
                 # Duplicate timestamp — skip detection, this isn't new information.
                 continue
 
             history = self._storage.recent_readings(city.name, DETECTION_WINDOW + 1)
             # history includes the row we just stored; drop it for detection.
             history = [r for r in history if r["observed_at"] != reading["observed_at"]]
-            for event in detect_for_reading(reading, history):
+            for event in detect_for_reading(reading, history, reading_id):
                 self._storage.insert_event(event)
                 log.info(
                     "event | %s | %s/%s | %s",

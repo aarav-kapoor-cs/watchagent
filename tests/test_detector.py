@@ -77,6 +77,35 @@ def test_cold_start_no_crash():
     assert all(e["event_type"] != "anomaly" for e in events)
 
 
+def test_feels_like_gap_fires():
+    """A large gap between apparent and actual temperature is notable."""
+    new = _reading("Ottawa", temp=-5.0)
+    new["apparent_temp"] = -18.0  # 13C colder than actual -> severe
+    events = detect_for_reading(new, [])
+    gap = next(e for e in events if e["event_type"] == "feels_like_gap")
+    assert gap["severity"] == "severe"
+    assert gap["field"] == "apparent_temp"
+
+
+def test_small_feels_like_gap_quiet():
+    """A normal apparent/actual difference must not fire."""
+    new = _reading("Ottawa", temp=20.0)
+    new["apparent_temp"] = 19.0
+    events = detect_for_reading(new, [])
+    assert all(e["event_type"] != "feels_like_gap" for e in events)
+
+
+def test_events_carry_summary_and_reading_id():
+    """Every per-reading event must include a summary and the triggering id."""
+    history = [_reading("Ottawa", temp=20 + (i % 2) * 0.3) for i in range(6)]
+    new = _reading("Ottawa", temp=31.0)
+    events = detect_for_reading(new, history, reading_id=99)
+    assert events
+    for e in events:
+        assert e["summary"]
+        assert e["reading_id"] == 99
+
+
 def test_vancouver_more_sensitive_than_ottawa():
     """Same swing is more notable in stable Vancouver than variable Ottawa.
 

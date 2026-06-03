@@ -13,7 +13,7 @@ So this detector judges each new reading against the recent history for that
 same city, and normalises by how variable that city normally is. The detectors
 are:
 
-1. ANOMALY (temperature, apparent_temp, wind):
+1. ANOMALY (temperature, wind):
    How far is this reading from the recent mean, measured in units of that
    field's recent spread (a z-score-like ratio)? We also divide by the city's
    configured baseline variability so the same swing is judged in context.
@@ -30,14 +30,19 @@ are:
    (the std is ~0). Instead we treat it categorically: rain starting after a dry
    spell, or a heavy-rain reading, is the event.
 
-4. CROSS-CITY SPREAD:
+4. FEELS-LIKE GAP (apparent vs actual temperature):
+   When the apparent temperature diverges sharply from the actual temperature
+   (wind chill or humidity), how it *feels* is the notable fact, not the number
+   on the thermometer.
+
+5. CROSS-CITY SPREAD:
    When the warmest and coldest of the three cities differ by an unusually large
    margin at the same time, that itself is worth surfacing — it is a fact about
    the system, not any single city.
 
 Each detector returns at most one event per reading per type, tagged with a
-severity and a human-readable reason, so the /events endpoint can answer
-"what happened, where, when, and why we thought it mattered".
+severity, a short summary, and a human-readable reason, so the /events endpoint
+can answer "what happened, where, when, and why we thought it mattered".
 """
 from __future__ import annotations
 
@@ -57,6 +62,8 @@ SEVERE_ANOMALY_RATIO = 3.2
 TEMP_RAPID_DELTA = 5.0     # deg C change vs previous reading
 WIND_RAPID_DELTA = 25.0    # km/h change vs previous reading
 PRECIP_HEAVY = 4.0         # mm in the preceding hour = heavy
+FEELS_LIKE_GAP = 6.0       # deg C between apparent and actual temperature
+FEELS_LIKE_SEVERE = 10.0
 CROSS_CITY_SPREAD = 18.0   # deg C between warmest and coldest city
 CROSS_CITY_SEVERE = 25.0
 
@@ -73,13 +80,16 @@ def _safe_float(value: Any) -> Optional[float]:
 
 
 def detect_for_reading(
-    reading: dict[str, Any], history: list[dict[str, Any]]
+    reading: dict[str, Any],
+    history: list[dict[str, Any]],
+    reading_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """Return notable events for a single new reading.
 
     ``history`` is the recent readings for the same city, newest first, NOT
     including the new reading. May be empty (cold start) — in that case only
-    detectors that need no history can fire.
+    detectors that need no history can fire. ``reading_id`` links each event
+    back to the stored reading that triggered it.
     """
     events: list[dict[str, Any]] = []
     city_name = reading["city"]
@@ -116,6 +126,7 @@ def detect_for_reading(
                     "field": field,
                     "severity": "severe" if severe else "moderate",
                     "value": round(value, 2),
+                    "summary": f"{field} unusually {direction} recent average",
                     "reason": (
                         f"{field} {value:.1f} is {ratio:.1f}x the normal spread "
                         f"{direction} the recent average of {avg:.1f} "
@@ -123,6 +134,7 @@ def detect_for_reading(
                     ),
                     "observed_at": observed_at,
                     "created_at": _now(),
+                    "reading_id": reading_id,
                 }
             )
 
@@ -146,12 +158,14 @@ def detect_for_reading(
                         "field": field,
                         "severity": "moderate",
                         "value": round(value, 2),
+                        "summary": f"rapid {field} change ({delta:+.1f})",
                         "reason": (
                             f"{field} changed {delta:+.1f} since the previous "
                             f"reading ({prev_value:.1f} -> {value:.1f})"
                         ),
                         "observed_at": observed_at,
                         "created_at": _now(),
+                        "reading_id": reading_id,
                     }
                 )
 
@@ -171,6 +185,9 @@ def detect_for_reading(
                     "field": "precipitation",
                     "severity": "severe" if heavy else "moderate",
                     "value": round(precip, 2),
+                    "summary": (
+                        "heavy precipitation" if heavy else "precipitation onset"
+                    ),
                     "reason": (
                         f"heavy precipitation {precip:.1f} mm"
                         if heavy
@@ -178,6 +195,33 @@ def detect_for_reading(
                     ),
                     "observed_at": observed_at,
                     "created_at": _now(),
+                    "reading_id": reading_id,
+                }
+            )
+
+    # --- 4. feels-like gap: apparent vs actual temperature ---
+    temp = _safe_float(reading.get("temperature"))
+    apparent = _safe_float(reading.get("apparent_temp"))
+    if temp is not None and apparent is not None:
+        gap = apparent - temp
+        if abs(gap) >= FEELS_LIKE_GAP:
+            severe = abs(gap) >= FEELS_LIKE_SEVERE
+            descriptor = "colder" if gap < 0 else "warmer"
+            events.append(
+                {
+                    "city": city_name,
+                    "event_type": "feels_like_gap",
+                    "field": "apparent_temp",
+                    "severity": "severe" if severe else "moderate",
+                    "value": round(apparent, 2),
+                    "summary": f"feels {abs(gap):.1f}C {descriptor} than actual",
+                    "reason": (
+                        f"apparent temperature {apparent:.1f} is {abs(gap):.1f}C "
+                        f"{descriptor} than the actual {temp:.1f}"
+                    ),
+                    "observed_at": observed_at,
+                    "created_at": _now(),
+                    "reading_id": reading_id,
                 }
             )
 
@@ -211,11 +255,13 @@ def detect_cross_city(latest_by_city: dict[str, dict[str, Any]]) -> list[dict[st
             "field": "temperature",
             "severity": "severe" if spread >= CROSS_CITY_SEVERE else "moderate",
             "value": round(spread, 2),
+            "summary": f"{spread:.1f}C temperature spread across cities",
             "reason": (
                 f"{spread:.1f}C spread across cities: {warmest} {temps[warmest]:.1f} "
                 f"vs {coldest} {temps[coldest]:.1f}"
             ),
             "observed_at": max(r["observed_at"] for r in latest_by_city.values()),
             "created_at": _now(),
+            "reading_id": None,
         }
     ]

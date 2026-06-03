@@ -28,8 +28,9 @@ class WeatherFetchError(Exception):
 def fetch_current(city: City) -> dict[str, Any]:
     """Fetch and normalise current conditions for ``city``.
 
-    Returns a reading dict with keys: city, observed_at, temperature,
-    apparent_temp, precipitation, wind_speed, weather_code, fetched_at.
+    Returns a reading dict with keys: city, latitude, longitude, observed_at,
+    temperature, apparent_temp, precipitation, wind_speed, weather_code,
+    fetched_at.
     ``observed_at`` is the API's own timestamp and is what we dedup on.
     """
     params = {
@@ -54,6 +55,8 @@ def fetch_current(city: City) -> dict[str, Any]:
 
     return {
         "city": city.name,
+        "latitude": city.latitude,
+        "longitude": city.longitude,
         "observed_at": current["time"],
         "temperature": current.get("temperature_2m"),
         "apparent_temp": current.get("apparent_temperature"),

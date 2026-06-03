@@ -1,22 +1,19 @@
 """API shape tests.
 
 Seed the database directly, then assert /health, /readings and /events return
-the exact structure the challenge contract specifies.
+the exact JSON structure the challenge contract specifies (field names included).
 """
-import os
-import tempfile
-
-_TMPDIR = tempfile.mkdtemp()
-os.environ["DATABASE_PATH"] = os.path.join(_TMPDIR, "import_time.db")
-
 import app.main as main  # noqa: E402
 from app.storage import Storage  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
 
 def _seed(storage: Storage):
     storage.insert_reading(
         {
             "city": "Ottawa",
+            "latitude": 45.42,
+            "longitude": -75.69,
             "observed_at": "2026-06-02T14:00",
             "temperature": 21.0,
             "apparent_temp": 20.0,
@@ -33,9 +30,11 @@ def _seed(storage: Storage):
             "field": "temperature",
             "severity": "moderate",
             "value": 21.0,
+            "summary": "temperature unusually above recent average",
             "reason": "test event",
             "observed_at": "2026-06-02T14:00",
             "created_at": "2026-06-02T14:01:00+00:00",
+            "reading_id": 1,
         }
     )
 
@@ -67,7 +66,19 @@ def test_readings_shape(tmp_path):
     body = resp.json()
     assert "readings" in body
     assert isinstance(body["readings"], list)
-    assert body["readings"][0]["city"] == "Ottawa"
+    reading = body["readings"][0]
+    assert reading["city"] == "Ottawa"
+    # Contract field names (Open-Meteo naming, per challenge_brief.md).
+    for key in (
+        "city",
+        "time",
+        "temperature_2m",
+        "apparent_temperature",
+        "precipitation",
+        "wind_speed_10m",
+        "weather_code",
+    ):
+        assert key in reading, f"missing contract field: {key}"
 
 
 def test_events_shape(tmp_path):
@@ -77,4 +88,16 @@ def test_events_shape(tmp_path):
     body = resp.json()
     assert "events" in body
     assert isinstance(body["events"], list)
-    assert body["events"][0]["event_type"] == "anomaly"
+    event = body["events"][0]
+    assert event["event_type"] == "anomaly"
+    # Contract field names, per challenge_brief.md.
+    for key in (
+        "city",
+        "event_type",
+        "time",
+        "severity",
+        "summary",
+        "reason",
+        "reading_id",
+    ):
+        assert key in event, f"missing contract field: {key}"
