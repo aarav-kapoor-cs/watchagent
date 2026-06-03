@@ -48,6 +48,7 @@ class Poller:
     def poll_once(self) -> None:
         """One full poll cycle. Public so tests can call it directly."""
         latest_by_city: dict[str, dict[str, Any]] = {}
+        any_new = False
 
         for city in CITIES.values():
             try:
@@ -63,6 +64,7 @@ class Poller:
                 # Duplicate timestamp — skip detection, this isn't new information.
                 continue
 
+            any_new = True
             history = self._storage.recent_readings(city.name, DETECTION_WINDOW + 1)
             # history includes the row we just stored; drop it for detection.
             history = [r for r in history if r["observed_at"] != reading["observed_at"]]
@@ -73,6 +75,16 @@ class Poller:
                     event["city"], event["event_type"],
                     event.get("field"), event["severity"],
                 )
+
+        # Cross-city detection must only run when at least one city produced a
+        # NEW reading this cycle. The poller fires far more often than the
+        # upstream data updates (e.g. every 5 min for hourly data), so without
+        # this guard a single persistent spread would be re-emitted on every
+        # cycle — the same way per-reading detection is skipped on duplicates
+        # above. That flooded the events table with identical cross_city_spread
+        # rows and buried genuinely distinct events behind them in /events.
+        if not any_new:
+            return
 
         for event in detect_cross_city(latest_by_city):
             self._storage.insert_event(event)
