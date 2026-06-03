@@ -148,7 +148,7 @@ keys (the same way CI runs it).
   for free.
 - **SQLite** for storage: zero-config, single-file, trivially persisted via a
   Docker volume. The data volume here (three cities, hourly readings) is tiny,
-  so a server database would be unjustified operational weight. The dedup
+  so a server database would be an unjustified operational weight. The dedup
   guarantee is enforced with a `UNIQUE (city, observed_at)` constraint at the
   schema level rather than in application code. WAL mode is enabled so the
   poller thread and API reads don't block each other.
