@@ -40,7 +40,7 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
 
 # Where SQLite lives. Mounted to a Docker volume so it survives restarts.
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/watchagent.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "data/watchagent.db")
 
 # Network timeout for a single poll attempt.
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "10"))

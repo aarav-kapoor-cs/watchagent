@@ -3,12 +3,15 @@
 Seed the database directly, then assert /health, /readings and /events return
 the exact structure the challenge contract specifies.
 """
-from __future__ import annotations
+import os
+import tempfile
 
-import app.main as main
-from app.storage import Storage
-from fastapi.testclient import TestClient
+_TMPDIR = tempfile.mkdtemp()
+os.environ["DATABASE_PATH"] = os.path.join(_TMPDIR, "import_time.db")
 
+import app.main as main  # noqa: E402
+from app.storage import Storage  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 def _seed(storage: Storage):
     storage.insert_reading(
