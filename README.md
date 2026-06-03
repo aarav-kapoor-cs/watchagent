@@ -3,6 +3,34 @@
 A Python service that polls live weather for three Canadian cities, decides what
 is *notable*, stores readings and events, and exposes them over an HTTP API.
 
+## What this demonstrates
+
+- Backend API development with FastAPI (typed validation, auto OpenAPI docs)
+- Persistent storage with SQLite and database-level deduplication
+- A background poller that fetches, dedups, and processes readings
+- Context-aware event detection (not fixed thresholds) — per-city, per-field
+- Dockerised single-container deployment with a persistent volume
+- A Cursor engineering setup: rules, scoped agents, and an executable skill
+- CI on every push: unit tests (network-mocked) plus a Docker build
+
+## Quick start
+
+```bash
+git clone https://github.com/aarav-kapoor-cs/watchagent.git
+cd watchagent
+cp .env.example .env
+docker compose up --build
+```
+
+Then, in another terminal:
+
+```bash
+curl http://localhost:8000/health
+curl "http://localhost:8000/readings?city=Ottawa&limit=5"
+curl "http://localhost:8000/events?limit=10"
+DATABASE_PATH=./data/watchagent.db python .cursor/skills/analyze.py summary
+```
+
 ---
 
 ## System overview
