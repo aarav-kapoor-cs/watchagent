@@ -48,14 +48,11 @@ CREATE TABLE IF NOT EXISTS events (
     field       TEXT,
     severity    TEXT    NOT NULL,
     value       REAL,
-    summary     TEXT    NOT NULL,
+    summary     TEXT,
     reason      TEXT    NOT NULL,
     observed_at TEXT    NOT NULL,
     created_at  TEXT    NOT NULL,
-    reading_id  INTEGER,
-    -- Suppress repeated identical events: the same condition for the same city
-    -- at the same observed timestamp is stored once, not on every poll cycle.
-    UNIQUE (city, event_type, field, observed_at)
+    reading_id  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_city_time
@@ -63,6 +60,26 @@ CREATE INDEX IF NOT EXISTS idx_readings_city_time
 CREATE INDEX IF NOT EXISTS idx_events_city_time
     ON events (city, observed_at DESC);
 """
+
+# The events dedup uniqueness is created by the migration (not in _SCHEMA) so it
+# can be applied AFTER collapsing any duplicate rows that a pre-dedup database
+# may already contain — creating it eagerly would fail on such a database.
+#
+# Suppresses repeated identical events: the same condition for the same city at
+# the same observed timestamp is stored once, not on every poll cycle.
+_EVENTS_DEDUP_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_events_dedup "
+    "ON events (city, event_type, field, observed_at)"
+)
+
+# Columns added after the original schema shipped. CREATE TABLE IF NOT EXISTS is
+# a no-op for an already-existing table, so a database created by an earlier
+# version (persisted on a Docker volume across upgrades) would otherwise be
+# missing these and every insert/serialize would fail. The migration adds them.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "readings": {"latitude": "REAL", "longitude": "REAL"},
+    "events": {"summary": "TEXT", "reading_id": "INTEGER"},
+}
 
 
 class Storage:
@@ -83,6 +100,43 @@ class Storage:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._migrate()
+
+    # ---- migration ------------------------------------------------------
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to the current schema, idempotently.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters a table that already exists,
+        so a database created by an earlier version (and persisted across an
+        upgrade via the Docker volume) keeps its old shape. Without this step the
+        new code would fail on every write (missing ``latitude``/``longitude``
+        columns) and on ``/events`` serialization (missing ``summary``),
+        silently halting all data collection. This runs for fresh databases too,
+        where every step is a harmless no-op.
+        """
+        with self._lock:
+            for table, columns in _ADDED_COLUMNS.items():
+                existing = {
+                    row["name"]
+                    for row in self._conn.execute(f"PRAGMA table_info({table})")
+                }
+                for name, decl in columns.items():
+                    if name not in existing:
+                        self._conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+                        )
+            # A pre-dedup database can hold duplicate events; collapse them
+            # (keep the earliest id) before enforcing the uniqueness index.
+            self._conn.execute(
+                """DELETE FROM events
+                   WHERE id NOT IN (
+                       SELECT MIN(id) FROM events
+                       GROUP BY city, event_type, field, observed_at
+                   )"""
+            )
+            self._conn.execute(_EVENTS_DEDUP_INDEX)
+            self._conn.commit()
 
     # ---- readings -------------------------------------------------------
 
